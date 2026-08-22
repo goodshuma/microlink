@@ -962,32 +962,31 @@ static void process_disco_pong(microlink_t *ml, const ml_rx_packet_t *pkt,
                              (int)((pkt->src_ip >> 24) & 0xFF), (int)((pkt->src_ip >> 16) & 0xFF),
                              (int)((pkt->src_ip >> 8) & 0xFF), (int)(pkt->src_ip & 0xFF),
                              (int)pkt->src_port, p->hostname);
-                    /* First direct path discovery — send a one-shot handshake
-                     * via direct UDP. Do NOT use wireguardif_connect() which
-                     * sets peer->active=true and causes infinite handshake
-                     * retries (every 5s) when the peer has us trimmed.
-                     * Instead, just fire a single handshake init. If the peer
-                     * has us configured, it will respond and establish session.
-                     * If not, we stop and wait for them to initiate. */
+                    /* First direct path discovery. Previously this fired a
+                     * one-shot handshake over *direct* UDP to "wake" the peer,
+                     * but a direct INIT is dropped by the peer's NAT before a
+                     * hole is open, so it never arrived and it also clobbered
+                     * peer->ip to the unreachable direct endpoint (breaking the
+                     * DERP retry path). Initiate over DERP instead — that
+                     * reliably reaches the peer; the data plane upgrades to this
+                     * direct endpoint later via update_peer_addr() roaming when
+                     * the peer sends us a direct packet. We seed connect_ip for
+                     * reference but keep peer->ip on DERP. (2026-08-23) */
                     if (!p->tried_initial_handshake) {
                         p->tried_initial_handshake = true;
-                        /* Store endpoint so wireguardif_connect sends to it */
                         wireguardif_update_endpoint(netif, (u8_t)p->wg_peer_index,
                                                      &ep_ip, pkt->src_port);
-                        /* Fire one handshake init but don't leave peer active.
-                         * wireguardif_connect sets active=true internally, so
-                         * we immediately clear it after to prevent retries. */
-                        wireguardif_connect(netif, (u8_t)p->wg_peer_index);
-                        /* Clear active to prevent infinite retry loop.
-                         * If handshake succeeds, the response handler will
-                         * establish the session regardless of active flag. */
+                        wireguardif_connect_derp(netif, (u8_t)p->wg_peer_index);
+                        /* Clear active so this discovery alone doesn't drive an
+                         * endless retry loop; ml_tcp / trigger_handshake owns
+                         * the retry cadence when we actually want to connect. */
                         {
                             struct wireguard_device *dev = (struct wireguard_device *)netif->state;
                             if (dev && p->wg_peer_index < WIREGUARD_MAX_PEERS) {
                                 dev->peers[p->wg_peer_index].active = false;
                             }
                         }
-                        ESP_LOGI(TAG, "WG one-shot handshake to %s (first direct path)", p->hostname);
+                        ESP_LOGI(TAG, "WG one-shot handshake to %s via DERP (first direct path)", p->hostname);
                     }
                 }
             }
@@ -1331,27 +1330,34 @@ esp_err_t ml_wg_mgr_trigger_handshake(microlink_t *ml, uint32_t dest_vpn_ip) {
     err_t is_up = wireguardif_peer_is_up(netif, (u8_t)p->wg_peer_index, NULL, NULL);
     if (is_up == ERR_OK) return ESP_OK;
 
-    /* Path 1: DERP (reliable fallback) */
+    /* Initiate the handshake over the DERP relay (peer->ip is cleared to ANY
+     * inside connect_derp, so wireguardif_peer_output routes via DERP).
+     *
+     * Rationale (2026-08-23): a direct UDP handshake INIT to the peer's
+     * DISCO endpoint is silently dropped by the peer's NAT when the peer
+     * has not yet opened a hole toward us — this is the common case for a
+     * client behind NAT trying to reach a peer behind a different NAT.
+     * The result was that the INIT never reached the peer and no session
+     * ever formed. DERP relay always delivers the INIT (both sides hold an
+     * outbound TLS connection to the relay), so the peer receives it and
+     * responds. Once the peer sends us a *direct* packet, wireguard-lwip's
+     * update_peer_addr() roams peer->ip to that direct endpoint and the
+     * data plane upgrades to direct automatically — matching Tailscale's
+     * "DERP first, upgrade to direct" model. We therefore no longer pin the
+     * peer to the (unreachable) direct endpoint here. */
     wireguardif_connect_derp(netif, (u8_t)p->wg_peer_index);
-    ESP_LOGI(TAG, "WG handshake triggered (DERP) to %s", p->hostname);
 
-    /* Path 2: Direct UDP (if DISCO has a known endpoint).
-     * This wakes the peer's magicsock via receiveIPv4 → noteRecvActivity.
-     * Set connect_ip first, then call wireguardif_connect which copies
-     * connect_ip → ip and starts a second handshake to the direct endpoint. */
+    /* Seed connect_ip with the DISCO-discovered endpoint (does NOT change the
+     * active peer->ip, which stays ANY/DERP) so a later explicit direct switch
+     * has a target if one is ever needed; the normal upgrade path is roaming. */
     if (p->best_ip != 0 && p->best_port != 0) {
         ip_addr_t ep_ip;
         IP_SET_TYPE_VAL(ep_ip, IPADDR_TYPE_V4);
         ip4_addr_set_u32(ip_2_ip4(&ep_ip), htonl(p->best_ip));
         wireguardif_update_endpoint(netif, (u8_t)p->wg_peer_index,
                                      &ep_ip, p->best_port);
-        wireguardif_connect(netif, (u8_t)p->wg_peer_index);
-        ESP_LOGI(TAG, "WG handshake triggered (direct) to %s at %d.%d.%d.%d:%d",
-                 p->hostname,
-                 (int)((p->best_ip >> 24) & 0xFF), (int)((p->best_ip >> 16) & 0xFF),
-                 (int)((p->best_ip >> 8) & 0xFF), (int)(p->best_ip & 0xFF),
-                 (int)p->best_port);
     }
+    ESP_LOGI(TAG, "WG handshake triggered (DERP) to %s", p->hostname);
 
     return ESP_OK;
 }
