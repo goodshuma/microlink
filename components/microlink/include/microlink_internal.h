@@ -73,9 +73,25 @@ extern "C" {
 #define ML_MAX_PACKET_SIZE      1500
 #define ML_DERP_MAX_FRAME       (ML_MAX_PACKET_SIZE + 64)
 
-/* DERP */
+/* DERP
+ *
+ * 制御プレーンが HomeDERP を返さなかった場合に使う既定リージョン。
+ * 以前はダラス(9)固定だったため、米国以外の tailnet では
+ *   - 中継が全く効かない(他ピアが別リージョンにいると PeerGone になる)
+ *   - 直接経路が張れない相手とは一切通信できない
+ * という問題があった。Kconfig で地域に合わせて変更できるようにする。
+ * (region 7=tok 東京, 9=dfw ダラス, 1=nyc, 2=sfo ...) */
+#ifdef CONFIG_ML_DERP_DEFAULT_REGION
+#define ML_DERP_REGION          CONFIG_ML_DERP_DEFAULT_REGION
+#else
 #define ML_DERP_REGION          9       /* Dallas (dfw) */
+#endif
+
+#ifdef CONFIG_ML_DERP_DEFAULT_HOST
+#define ML_DERP_HOST            CONFIG_ML_DERP_DEFAULT_HOST
+#else
 #define ML_DERP_HOST            "derp9e.tailscale.com"
+#endif
 #define ML_DERP_PORT            443
 
 /* Tailscale control plane */
