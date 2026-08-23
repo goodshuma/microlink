@@ -323,4 +323,36 @@ menu "MicroLink V2 Configuration"
 
     endmenu
 
+    menu "DERP relay"
+
+        config ML_DERP_DEFAULT_REGION
+            int "Default DERP region ID"
+            default 9
+            range 1 999
+            help
+                Tailscale の制御プレーンが HomeDERP を割り当ててこなかった
+                場合に使う DERP リージョン ID。
+
+                MicroLink は1つのリージョンにしか接続しないため、ここが
+                実際に使う中継サーバになる。tailnet の他のノードと違う
+                リージョンを選ぶと、DERP 経由の中継が届かず(PeerGone)、
+                直接経路が張れない相手とは通信できなくなる。
+                自分の地域に合わせて設定すること。
+
+                主なリージョン ID:
+                  1=nyc  2=sfo  7=tok(東京)  9=dfw(ダラス)  10=sea
+
+                `tailscale debug derp-map` で全一覧を確認できる。
+
+        config ML_DERP_DEFAULT_HOST
+            string "Default DERP hostname"
+            default "derp9e.tailscale.com"
+            help
+                上記リージョンにつなぐ際のホスト名(フォールバック用)。
+                制御プレーンから DERP マップを取得できた場合は、そちらの
+                リージョン定義にあるホスト名が優先される。
+                例: 東京なら "derp7h.tailscale.com"
+
+    endmenu
+
 endmenu
